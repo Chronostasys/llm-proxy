@@ -61,6 +61,7 @@ func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.Prov
 	}
 
 	copyRequestHeaders(upstreamReq.Header, r.Header)
+	applyOriginalClientMetadata(upstreamReq, r)
 	upstreamReq.ContentLength = r.ContentLength
 
 	switch provider.Type {
@@ -73,6 +74,15 @@ func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.Prov
 	}
 
 	return upstreamReq, nil
+}
+
+func applyOriginalClientMetadata(dstReq, srcReq *http.Request) {
+	if userAgent := srcReq.Header.Get("User-Agent"); userAgent != "" {
+		dstReq.Header.Set("User-Agent", userAgent)
+	} else {
+		// Prevent the Go client from injecting its own default User-Agent when the caller omitted one.
+		dstReq.Header.Set("User-Agent", "")
+	}
 }
 
 func copyRequestHeaders(dst, src http.Header) {

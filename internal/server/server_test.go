@@ -58,6 +58,53 @@ func TestHandlerProxiesOpenAIRequests(t *testing.T) {
 	}
 }
 
+func TestHandlerForwardsUserAgentWithoutProxyHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "MyClient/1.0" {
+			t.Fatalf("User-Agent = %q, want forwarded client user agent", got)
+		}
+		if got := r.Header.Get("Accept-Language"); got != "zh-CN,zh;q=0.9" {
+			t.Fatalf("Accept-Language = %q, want forwarded client header", got)
+		}
+		if got := r.Header.Get("X-Request-Id"); got != "req-123" {
+			t.Fatalf("X-Request-Id = %q, want forwarded request id", got)
+		}
+		if got := r.Header.Get("X-Forwarded-Host"); got != "" {
+			t.Fatalf("X-Forwarded-Host = %q, want empty", got)
+		}
+		if got := r.Header.Get("X-Forwarded-Proto"); got != "" {
+			t.Fatalf("X-Forwarded-Proto = %q, want empty", got)
+		}
+		if got := r.Header.Get("X-Forwarded-For"); got != "" {
+			t.Fatalf("X-Forwarded-For = %q, want empty", got)
+		}
+		if got := r.Header.Get("Forwarded"); got != "" {
+			t.Fatalf("Forwarded = %q, want empty", got)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	handler := testHandler(t, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "https://client.example/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.RemoteAddr = "203.0.113.10:4321"
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "MyClient/1.0")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("X-Request-Id", "req-123")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
 func TestHandlerProxiesAnthropicRequests(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
