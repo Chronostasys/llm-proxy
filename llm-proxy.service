@@ -1,0 +1,12 @@
+[Unit]
+Description=LLM Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/llm-proxy -config /etc/llm-proxy/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

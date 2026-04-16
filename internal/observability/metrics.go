@@ -2,7 +2,9 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 )
@@ -32,11 +34,39 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 }
 
 func (m *Metrics) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("format") == "prometheus" {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			_ = m.writePrometheus(w)
+			return
+		}
 		payload := m.snapshot()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(payload)
 	})
+}
+
+func (m *Metrics) writePrometheus(w http.ResponseWriter) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	_, _ = fmt.Fprintf(w, "# HELP llm_proxy_requests_total Total number of proxy requests.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE llm_proxy_requests_total counter\n")
+	_, _ = fmt.Fprintf(w, "llm_proxy_requests_total %d\n\n", m.requestsTotal)
+
+	_, _ = fmt.Fprintf(w, "# HELP llm_proxy_responses_total Total number of responses by status code.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE llm_proxy_responses_total counter\n")
+
+	statuses := make([]int, 0, len(m.responsesByStatus))
+	for status := range m.responsesByStatus {
+		statuses = append(statuses, status)
+	}
+	sort.Ints(statuses)
+	for _, status := range statuses {
+		_, _ = fmt.Fprintf(w, "llm_proxy_responses_total{status=\"%d\"} %d\n", status, m.responsesByStatus[status])
+	}
+
+	return nil
 }
 
 func (m *Metrics) snapshot() map[string]any {
