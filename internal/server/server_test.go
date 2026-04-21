@@ -345,3 +345,46 @@ func testHandlerWithProviders(t *testing.T, providers []config.ProviderConfig) h
 	}
 	return handler
 }
+
+func TestHandlerProxiesOpenAIResponsesAPI(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-openai" {
+			t.Fatalf("Authorization = %q, want upstream bearer token", got)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("io.ReadAll() error = %v", err)
+		}
+		if !strings.Contains(string(body), `"model"`) {
+			t.Fatalf("body = %q, want forwarded request body with model field", string(body))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_123","status":"completed"}`))
+	}))
+	defer upstream.Close()
+
+	handler := testHandler(t, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"gpt-4.1","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); body != `{"id":"resp_123","status":"completed"}` {
+		t.Fatalf("body = %q, want upstream response body", body)
+	}
+}
