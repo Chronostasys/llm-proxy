@@ -57,46 +57,14 @@ func buildUpstreamURL(baseURL, requestPath, rawQuery string) (*url.URL, error) {
 
 	base.Path = joinURLPath(base.Path, path)
 	base.RawPath = ""
-
-	// Filter out known fingerprint query parameters (e.g. Claude Code adds ?beta=true).
-	if base.RawQuery, err = sanitizeQuery(rawQuery); err != nil {
-		return nil, fmt.Errorf("sanitize query: %w", err)
-	}
-
+	base.RawQuery = rawQuery
 	return base, nil
-}
-
-// sanitizeQuery removes well-known fingerprint query parameters and returns
-// the cleaned query string. Currently strips "beta=true" which Claude Code
-// appends to every Anthropic API request.
-func sanitizeQuery(rawQuery string) (string, error) {
-	if rawQuery == "" {
-		return "", nil
-	}
-	values, err := url.ParseQuery(rawQuery)
-	if err != nil {
-		return rawQuery, nil // unparseable — forward as-is
-	}
-
-	// Remove Claude Code fingerprint parameters.
-	delete(values, "beta")
-
-	cleaned := values.Encode()
-	if cleaned == "" {
-		return "", nil
-	}
-	return cleaned, nil
 }
 
 func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.ProviderConfig) (*http.Request, error) {
 	var body io.ReadCloser
 	if r.Body != nil {
 		body = r.Body
-		// When disguise is enabled for Anthropic, strip body-level fingerprints
-		// (e.g. metadata with Claude Code session-encoded user_id).
-		if provider.Type == config.ProviderTypeAnthropic && provider.Disguise.Enabled {
-			body = anthropicprovider.DisguiseBody(body)
-		}
 	}
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
@@ -117,9 +85,11 @@ func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.Prov
 		return nil, fmt.Errorf("unsupported provider type: %s", provider.Type)
 	}
 
-	// Recalculate Content-Length after potential body transformation.
+	// When disguise is enabled, inject ?beta=true (Claude Code always sends it).
 	if provider.Type == config.ProviderTypeAnthropic && provider.Disguise.Enabled {
-		upstreamReq.ContentLength = -1 // force chunked / re-measure
+		q := upstreamReq.URL.Query()
+		q.Set("beta", "true")
+		upstreamReq.URL.RawQuery = q.Encode()
 	}
 
 	return upstreamReq, nil

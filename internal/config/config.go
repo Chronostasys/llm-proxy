@@ -45,15 +45,11 @@ type ProviderConfig struct {
 	Disguise        DisguiseConfig    `yaml:"disguise"`
 }
 
-// DisguiseConfig controls request fingerprint masking to make proxied traffic
-// indistinguishable from a standard Anthropic SDK or web console client.
+// DisguiseConfig controls request fingerprint injection to make proxied traffic
+// indistinguishable from a genuine Claude Code CLI session.
 type DisguiseConfig struct {
 	// Enabled activates all disguise transformations.
 	Enabled bool `yaml:"enabled"`
-
-	// UserAgent overrides the User-Agent header. When empty, a Chrome-like
-	// default is used so the request looks like a typical browser session.
-	UserAgent string `yaml:"user_agent"`
 }
 
 func Load(path string) (Config, error) {
