@@ -14,6 +14,18 @@ import (
 // User-Agent is configured. Matches a recent Chrome on Windows.
 const DefaultDisguiseUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
+// allowedHeaders is the whitelist of headers that are legitimate for Anthropic
+// API requests. Everything else is a fingerprint and gets stripped.
+var allowedHeaders = map[string]bool{
+	"content-type":     true,
+	"accept":           true,
+	"accept-encoding":  true,
+	"accept-language":  true,
+	"anthropic-version": true,
+	"anthropic-beta":   true,
+	"x-api-key":        true, // set by proxy
+}
+
 func ApplyHeaders(headers http.Header, provider config.ProviderConfig) {
 	headers.Del("Authorization")
 	headers.Set("x-api-key", provider.UpstreamAPIKey)
@@ -30,22 +42,32 @@ func applyStaticHeaders(headers http.Header, values map[string]string) {
 	}
 }
 
-// applyDisguiseHeaders removes every fingerprint that identifies the caller as
-// Claude Code (or any Stainless-generated SDK) and replaces them with values
-// that match a typical Anthropic web-console or browser-based client.
+// applyDisguiseHeaders uses a whitelist approach: wipe every header that is
+// not on the Anthropic API allowlist, then inject browser-like values for
+// User-Agent, Accept-Encoding, Accept-Language, and Sec-Fetch-*.
+// This is robust against any future headers Claude Code might add.
 func applyDisguiseHeaders(headers http.Header, disguise config.DisguiseConfig) {
-	// 1. Strip all X-Stainless-* headers — the single biggest fingerprint.
-	for key := range headers {
-		if strings.HasPrefix(strings.ToLower(key), "x-stainless-") {
-			delete(headers, key)
+	// 1. Save the values we want to keep from the whitelist.
+	saved := make(map[string][]string)
+	for key, values := range headers {
+		if allowedHeaders[strings.ToLower(key)] {
+			saved[key] = values
 		}
 	}
 
-	// 2. Strip Claude Code identity headers.
-	headers.Del("x-app")
-	headers.Del("anthropic-dangerous-direct-browser-access")
+	// 2. Nuke everything.
+	for key := range headers {
+		delete(headers, key)
+	}
 
-	// 3. Clean anthropic-beta: remove claude-code-* flags that only Claude Code sends.
+	// 3. Restore whitelisted headers.
+	for key, values := range saved {
+		for _, v := range values {
+			headers.Add(key, v)
+		}
+	}
+
+	// 4. Clean anthropic-beta: remove claude-code-* flags.
 	if beta := headers.Get("anthropic-beta"); beta != "" {
 		if cleaned := cleanAnthropicBeta(beta); cleaned != "" {
 			headers.Set("anthropic-beta", cleaned)
@@ -54,31 +76,28 @@ func applyDisguiseHeaders(headers http.Header, disguise config.DisguiseConfig) {
 		}
 	}
 
-	// 4. Replace User-Agent with a browser-like string.
+	// 5. Strip zstd from Accept-Encoding (uncommon outside Node.js).
+	if ae := headers.Get("Accept-Encoding"); ae != "" {
+		headers.Set("Accept-Encoding", stripZstd(ae))
+	}
+	if headers.Get("Accept-Encoding") == "" {
+		headers.Set("Accept-Encoding", "gzip, deflate, br")
+	}
+
+	// 6. Inject browser-like User-Agent.
 	ua := disguise.UserAgent
 	if ua == "" {
 		ua = DefaultDisguiseUserAgent
 	}
 	headers.Set("User-Agent", ua)
 
-	// 5. Strip zstd from Accept-Encoding — very uncommon outside Node.js.
-	if ae := headers.Get("Accept-Encoding"); ae != "" {
-		headers.Set("Accept-Encoding", stripZstd(ae))
-	}
-
-	// 6. Add browser-typical headers that Claude Code omits.
+	// 7. Add browser-typical headers.
 	if headers.Get("Accept-Language") == "" {
 		headers.Set("Accept-Language", "en-US,en;q=0.9")
 	}
-	if headers.Get("Sec-Fetch-Dest") == "" {
-		headers.Set("Sec-Fetch-Dest", "empty")
-	}
-	if headers.Get("Sec-Fetch-Mode") == "" {
-		headers.Set("Sec-Fetch-Mode", "cors")
-	}
-	if headers.Get("Sec-Fetch-Site") == "" {
-		headers.Set("Sec-Fetch-Site", "same-origin")
-	}
+	headers.Set("Sec-Fetch-Dest", "empty")
+	headers.Set("Sec-Fetch-Mode", "cors")
+	headers.Set("Sec-Fetch-Site", "same-origin")
 }
 
 // cleanAnthropicBeta removes claude-code-* beta flags and returns the rest.
@@ -109,7 +128,6 @@ func stripZstd(ae string) string {
 // DisguiseBody transforms the request body to remove Claude Code fingerprints.
 // It strips the "metadata" field (which contains a user_id encoded with the
 // Claude Code session format) and returns the modified body reader.
-// Returns nil if the body is not JSON or cannot be parsed.
 func DisguiseBody(body io.ReadCloser) io.ReadCloser {
 	if body == nil {
 		return body
@@ -123,11 +141,9 @@ func DisguiseBody(body io.ReadCloser) io.ReadCloser {
 
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		// Not valid JSON — return as-is (e.g. SSE stream body, empty).
 		return io.NopCloser(bytes.NewReader(raw))
 	}
 
-	// Strip metadata — contains "user_id" with Claude Code session encoding.
 	delete(obj, "metadata")
 
 	out, err := json.Marshal(obj)

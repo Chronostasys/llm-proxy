@@ -38,6 +38,154 @@ func TestApplyDisguiseHeaders_StripsStainless(t *testing.T) {
 	}
 }
 
+// TestApplyDisguiseHeaders_WhitelistStripsUnknownHeaders verifies that ANY
+// header not on the explicit allowlist gets stripped, regardless of name.
+// This is the core guarantee: future Claude Code versions may add arbitrary
+// headers, but they will never leak through.
+func TestApplyDisguiseHeaders_WhitelistStripsUnknownHeaders(t *testing.T) {
+	provider := config.ProviderConfig{
+		UpstreamAPIKey: "test-key",
+		Disguise:       config.DisguiseConfig{Enabled: true},
+	}
+
+	// Simulate a future Claude Code version that adds headers we've never seen.
+	h := make(http.Header)
+	h.Set("User-Agent", "claude-cli/99.0.0 (external, sdk-cli)")
+	h.Set("X-Stainless-Lang", "js")
+	h.Set("X-Stainless-Package-Version", "99.99.0")
+	h.Set("x-app", "cli")
+	h.Set("anthropic-dangerous-direct-browser-access", "true")
+	h.Set("X-Client-Name", "claude-code")
+	h.Set("X-Client-Version", "1.0.26")
+	h.Set("X-Unknown-Future-Header", "some-value")
+	h.Set("X-Claude-Session-Id", "abc-123")
+	h.Set("X-Telemetry-Id", "xyz")
+	h.Set("Some-Random-New-Header", "anything")
+	// These should survive (on whitelist)
+	h.Set("Content-Type", "application/json")
+	h.Set("Accept", "application/json")
+	h.Set("Anthropic-Version", "2023-06-01")
+	h.Set("Anthropic-Beta", "interleaved-thinking-2025-05-14")
+
+	ApplyHeaders(h, provider)
+
+	// Verify all unknown headers are gone.
+	unknownHeaders := []string{
+		"X-Stainless-Lang", "X-Stainless-Package-Version",
+		"x-app", "anthropic-dangerous-direct-browser-access",
+		"X-Client-Name", "X-Client-Version",
+		"X-Unknown-Future-Header", "X-Claude-Session-Id",
+		"X-Telemetry-Id", "Some-Random-New-Header",
+	}
+	for _, key := range unknownHeaders {
+		if v := h.Get(key); v != "" {
+			t.Errorf("unknown header %q should be stripped, got %q", key, v)
+		}
+	}
+
+	// Verify whitelisted headers survive.
+	if v := h.Get("Content-Type"); v != "application/json" {
+		t.Errorf("Content-Type should survive, got %q", v)
+	}
+	if v := h.Get("Accept"); v != "application/json" {
+		t.Errorf("Accept should survive, got %q", v)
+	}
+	if v := h.Get("Anthropic-Version"); v != "2023-06-01" {
+		t.Errorf("Anthropic-Version should survive, got %q", v)
+	}
+	if v := h.Get("Anthropic-Beta"); v != "interleaved-thinking-2025-05-14" {
+		t.Errorf("Anthropic-Beta should survive (cleaned), got %q", v)
+	}
+
+	// Verify no claude-cli in UA.
+	ua := h.Get("User-Agent")
+	if strings.Contains(ua, "claude") {
+		t.Errorf("User-Agent should not contain 'claude': %q", ua)
+	}
+}
+
+// TestApplyDisguiseHeaders_FullSimulation simulates a complete Claude Code
+// request with all known + unknown fingerprints and verifies clean output.
+func TestApplyDisguiseHeaders_FullSimulation(t *testing.T) {
+	provider := config.ProviderConfig{
+		UpstreamAPIKey: "sk-ant-real-key",
+		UpstreamHeaders: map[string]string{
+			"anthropic-version": "2023-06-01",
+		},
+		Disguise: config.DisguiseConfig{Enabled: true},
+	}
+
+	// Simulate exact headers from Claude Code 2.1.51 capture + future additions.
+	h := make(http.Header)
+	h.Set("Accept", "application/json")
+	h.Set("Authorization", "Bearer client-token") // proxy auth, must be removed
+	h.Set("Content-Type", "application/json")
+	h.Set("User-Agent", "claude-cli/2.1.114 (external, sdk-cli)")
+	h.Set("X-Stainless-Arch", "x64")
+	h.Set("X-Stainless-Lang", "js")
+	h.Set("X-Stainless-OS", "Linux")
+	h.Set("X-Stainless-Package-Version", "0.74.0")
+	h.Set("X-Stainless-Retry-Count", "0")
+	h.Set("X-Stainless-Runtime", "node")
+	h.Set("X-Stainless-Runtime-Version", "v24.3.0")
+	h.Set("X-Stainless-Timeout", "3000")
+	h.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05")
+	h.Set("anthropic-dangerous-direct-browser-access", "true")
+	h.Set("anthropic-version", "2023-06-01")
+	h.Set("x-app", "cli")
+	h.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+
+	ApplyHeaders(h, provider)
+
+	// Must NOT be present.
+	forbidden := []string{
+		"Authorization", "X-Stainless-Arch", "X-Stainless-Lang",
+		"X-Stainless-OS", "X-Stainless-Package-Version",
+		"X-Stainless-Retry-Count", "X-Stainless-Runtime",
+		"X-Stainless-Runtime-Version", "X-Stainless-Timeout",
+		"x-app", "anthropic-dangerous-direct-browser-access",
+	}
+	for _, key := range forbidden {
+		if v := h.Get(key); v != "" {
+			t.Errorf("forbidden header %q leaked: %q", key, v)
+		}
+	}
+
+	// Must be present and correct.
+	if v := h.Get("x-api-key"); v != "sk-ant-real-key" {
+		t.Errorf("x-api-key = %q, want upstream key", v)
+	}
+	if v := h.Get("anthropic-version"); v != "2023-06-01" {
+		t.Errorf("anthropic-version = %q, want 2023-06-01", v)
+	}
+	if v := h.Get("Content-Type"); v != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", v)
+	}
+
+	// anthropic-beta should have claude-code flags removed.
+	beta := h.Get("anthropic-beta")
+	if strings.Contains(beta, "claude-code") {
+		t.Errorf("anthropic-beta still contains claude-code: %q", beta)
+	}
+	if !strings.Contains(beta, "interleaved-thinking") {
+		t.Errorf("anthropic-beta should preserve non-code flags: %q", beta)
+	}
+
+	// User-Agent must look like a browser.
+	ua := h.Get("User-Agent")
+	if strings.Contains(ua, "claude") {
+		t.Errorf("User-Agent still contains 'claude': %q", ua)
+	}
+	if !strings.Contains(ua, "Chrome") {
+		t.Errorf("User-Agent should be Chrome-like: %q", ua)
+	}
+
+	// Accept-Encoding must not have zstd.
+	ae := h.Get("Accept-Encoding")
+	if strings.Contains(ae, "zstd") {
+		t.Errorf("Accept-Encoding still contains zstd: %q", ae)
+	}
+}
 func TestApplyDisguiseHeaders_StripsClaudeCodeIdentity(t *testing.T) {
 	provider := config.ProviderConfig{
 		UpstreamAPIKey: "test-key",
