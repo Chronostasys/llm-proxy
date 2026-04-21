@@ -44,27 +44,59 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, provider con
 	return writeUpstreamResponse(w, r, resp)
 }
 
-func buildUpstreamURL(baseURL, path, rawQuery string) (*url.URL, error) {
+func buildUpstreamURL(baseURL, requestPath, rawQuery string) (*url.URL, error) {
 	base, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil {
 		return nil, fmt.Errorf("build upstream url: %w", err)
 	}
 
-	requestPath := normalizeUpstreamPath(path)
+	path := normalizeUpstreamPath(requestPath)
 	if hasVersionedBasePath(base.Path) {
-		requestPath = trimLeadingAPIVersion(requestPath)
+		path = trimLeadingAPIVersion(path)
 	}
 
-	base.Path = joinURLPath(base.Path, requestPath)
+	base.Path = joinURLPath(base.Path, path)
 	base.RawPath = ""
-	base.RawQuery = rawQuery
+
+	// Filter out known fingerprint query parameters (e.g. Claude Code adds ?beta=true).
+	if base.RawQuery, err = sanitizeQuery(rawQuery); err != nil {
+		return nil, fmt.Errorf("sanitize query: %w", err)
+	}
+
 	return base, nil
+}
+
+// sanitizeQuery removes well-known fingerprint query parameters and returns
+// the cleaned query string. Currently strips "beta=true" which Claude Code
+// appends to every Anthropic API request.
+func sanitizeQuery(rawQuery string) (string, error) {
+	if rawQuery == "" {
+		return "", nil
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return rawQuery, nil // unparseable — forward as-is
+	}
+
+	// Remove Claude Code fingerprint parameters.
+	delete(values, "beta")
+
+	cleaned := values.Encode()
+	if cleaned == "" {
+		return "", nil
+	}
+	return cleaned, nil
 }
 
 func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.ProviderConfig) (*http.Request, error) {
 	var body io.ReadCloser
 	if r.Body != nil {
 		body = r.Body
+		// When disguise is enabled for Anthropic, strip body-level fingerprints
+		// (e.g. metadata with Claude Code session-encoded user_id).
+		if provider.Type == config.ProviderTypeAnthropic && provider.Disguise.Enabled {
+			body = anthropicprovider.DisguiseBody(body)
+		}
 	}
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
@@ -83,6 +115,11 @@ func buildUpstreamRequest(r *http.Request, target *url.URL, provider config.Prov
 		anthropicprovider.ApplyHeaders(upstreamReq.Header, provider)
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", provider.Type)
+	}
+
+	// Recalculate Content-Length after potential body transformation.
+	if provider.Type == config.ProviderTypeAnthropic && provider.Disguise.Enabled {
+		upstreamReq.ContentLength = -1 // force chunked / re-measure
 	}
 
 	return upstreamReq, nil

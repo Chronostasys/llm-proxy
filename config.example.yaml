@@ -30,3 +30,10 @@ providers:
     upstream_api_key: "${ANTHROPIC_API_KEY}"
     upstream_headers:
       anthropic-version: "2023-06-01"
+    # Strip Claude Code fingerprints so the upstream API provider sees a
+    # standard Anthropic SDK / browser client instead of claude-cli.
+    # Removes: X-Stainless-*, x-app, anthropic-dangerous-direct-browser-access,
+    # claude-code-* beta flags, zstd encoding, body metadata, ?beta=true query.
+    disguise:
+      enabled: true
+      # user_agent: ""  # empty = Chrome-like default

@@ -42,6 +42,18 @@ type ProviderConfig struct {
 	UpstreamBaseURL string            `yaml:"upstream_base_url"`
 	UpstreamAPIKey  string            `yaml:"upstream_api_key"`
 	UpstreamHeaders map[string]string `yaml:"upstream_headers"`
+	Disguise        DisguiseConfig    `yaml:"disguise"`
+}
+
+// DisguiseConfig controls request fingerprint masking to make proxied traffic
+// indistinguishable from a standard Anthropic SDK or web console client.
+type DisguiseConfig struct {
+	// Enabled activates all disguise transformations.
+	Enabled bool `yaml:"enabled"`
+
+	// UserAgent overrides the User-Agent header. When empty, a Chrome-like
+	// default is used so the request looks like a typical browser session.
+	UserAgent string `yaml:"user_agent"`
 }
 
 func Load(path string) (Config, error) {
